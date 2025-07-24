@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign In</title>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
+        import { getDatabase, ref, set, get } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-database.js";
+
+        const firebaseConfig = {
+            databaseURL: "https://sample123-456-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "sample123-456",
+        };
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        let currentFormType;
+        let popupTimeoutId; // To store the ID of the timeout for clearing
+        let formAnimationTimeoutId; // To manage the form's staggered animation timeout
+
+        // --- Utility Function: Generate a simple unique-ish code ---
+        // IMPORTANT: This is a very basic UUID-like generator. For true security,
+        // you would need cryptographically secure random number generation and
+        // a robust system for managing these codes (e.g., one-time use, expiry).
+        function generateRecoveryCode() {
+            return 'xxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0,
+                    v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        // --- Custom Popup Functions ---
+        // Function to display the custom popup
+        // *** UPDATED: Added autoClose parameter, defaults to true ***
+        function showCustomPopup(message, isError = false, autoClose = true) {
+            const popup = document.getElementById('custom-popup');
+            const popupContent = document.getElementById('popup-content'); 
+            const popupMessageText = document.getElementById('popup-message-text'); 
+
+            // Always clear any existing timeout when a new popup is shown
+            clearTimeout(popupTimeoutId);
+
+            popupMessageText.innerHTML = message; // Use innerHTML to allow for line breaks
+            popupContent.style.backgroundColor = isError ? 'rgba(255, 0, 0, 0.9)' : 'rgba(0, 128, 0, 0.9)'; 
+            
+            popup.style.display = 'flex'; 
+            popup.style.opacity = '1';
+            popupContent.classList.add('show'); 
+
+            // *** UPDATED: Only set timeout if autoClose is true ***
+            if (autoClose) {
+                popupTimeoutId = setTimeout(() => {
+                    hideCustomPopup();
+                }, isError ? 4000 : 2500); // Errors display a bit longer
+            }
+            // If autoClose is false, the popup will remain visible until manually dismissed.
+        }
+
+        // Function to hide the custom popup
+        function hideCustomPopup() {
+            const popup = document.getElementById('custom-popup');
+            const popupContent = document.getElementById('popup-content'); 
+            
+            popup.style.opacity = '0';
+            popupContent.classList.remove('show'); 
+
+            setTimeout(() => {
+                popup.style.display = 'none';
+                popupContent.style.backgroundColor = ''; 
+            }, 300); 
+        }
+        // --- End Custom Popup Functions ---
+
+
+        // Function to write data to Realtime Database (for new users)
+        async function writeUserData(userId, userKey) {
+            try {
+                const userRef = ref(db, `users/${userId}`);
+                const snapshot = await get(userRef);
+
+                if (snapshot.exists()) {
+                    // *** Auto-closes: User already exists warning ***
+                    showCustomPopup(`Username '${userId}' already exists.<br>Please choose a different one.`, true);
+                    console.warn(`Attempted to register existing username: ${userId}`);
+                } else {
+                    // IMPORTANT: This stores user passwords and recovery codes directly in plain text. This is EXTREMELY INSECURE.
+                    // For a real application, always use Firebase Authentication, which handles password hashing and security for you!
+                    const recoveryCode = generateRecoveryCode(); // Generate new code
+                    await set(userRef, {
+                        password: userKey,
+                        recoveryCode: recoveryCode // Store the recovery code
+                    });
+                    // *** DOES NOT Auto-close: Displays critical recovery code ***
+                    showCustomPopup(`User '${userId}' registered successfully!<br><b>Your Recovery Code is: ${recoveryCode}</b><br>Please save this code!`, false, false);
+                    console.log(`User '${userId}' registered successfully. Recovery Code: ${recoveryCode}`);
+                }
+            } catch (error) {
+                // *** Auto-closes: Registration error ***
+                showCustomPopup(`Could not register user: ${error.message}`, true);
+                console.error("Error writing user data:", error);
+            }
+        }
+
+        // Function to sign in an existing user by checking Realtime Database
+        async function signInUser(userId, userKey) {
+            try {
+                const userRef = ref(db, `users/${userId}`);
+                const snapshot = await get(userRef);
+
+                if (snapshot.exists()) {
+                    const userData = snapshot.val();
+                    // IMPORTANT: Comparing plain-text passwords. This is EXTREMELY INSECURE.
+                    // For a real application, always use Firebase Authentication, which handles password hashing and security for you!
+                    if (userData.password === userKey) {
+                        // *** Auto-closes: Sign-in success ***
+                        showCustomPopup(`Welcome, ${userId}! You are signed in.`);
+                        console.log(`User '${userId}' signed in successfully.`);
+                    } else {
+                        // *** Auto-closes: Invalid password ***
+                        showCustomPopup("Invalid password.", true);
+                        console.log("Sign-in failed: Invalid password for user:", userId);
+                    }
+                } else {
+                    // *** Auto-closes: User not found ***
+                    showCustomPopup("User not found.", true);
+                    console.log("Sign-in failed: User not found:", userId);
+                }
+            } catch (error) {
+                // *** Auto-closes: Sign-in problem ***
+                showCustomPopup(`Problem signing in: ${error.message}`, true);
+                console.error("Error signing in:", error);
+            }
+        }
+
+        // --- NEW: Handle Forgot Password Flow ---
+        async function handleForgotPassword() {
+            const username = prompt("Please enter your username:");
+            if (!username) {
+                // *** Auto-closes: Password reset cancelled ***
+                showCustomPopup("Password reset cancelled.", true);
+                return;
+            }
+
+            const currentRecoveryCode = prompt("Please enter your current recovery code:");
+            if (!currentRecoveryCode) {
+                // *** Auto-closes: Password reset cancelled ***
+                showCustomPopup("Password reset cancelled.", true);
+                return;
+            }
+
+            try {
+                const userRef = ref(db, `users/${username}`);
+                const snapshot = await get(userRef);
+
+                if (snapshot.exists()) {
+                    const userData = snapshot.val();
+                    if (userData.recoveryCode === currentRecoveryCode) {
+                        const newPassword = prompt("Please enter your new password:");
+                        if (!newPassword) {
+                            // *** Auto-closes: Password reset cancelled ***
+                            showCustomPopup("Password reset cancelled.", true);
+                            return;
+                        }
+
+                        // IMPORTANT: Still storing passwords in plain text. Extremely insecure.
+                        // Generating a NEW recovery code after reset for consistency with your request.
+                        const newRecoveryCode = generateRecoveryCode();
+                        await set(userRef, {
+                            password: newPassword,
+                            recoveryCode: newRecoveryCode
+                        });
+                        // *** DOES NOT Auto-close: Displays critical new recovery code ***
+                        showCustomPopup(`Password for '${username}' has been reset successfully!<br><b>Your NEW Recovery Code is: ${newRecoveryCode}</b><br>Please save this new code!`, false, false);
+                        console.log(`Password for '${username}' reset. New Recovery Code: ${newRecoveryCode}`);
+                    } else {
+                        // *** Auto-closes: Invalid recovery code ***
+                        showCustomPopup("Invalid recovery code for that username.", true);
+                        console.log(`Password reset failed: Invalid recovery code for ${username}`);
+                    }
+                } else {
+                    // *** Auto-closes: Username not found ***
+                    showCustomPopup("Username not found.", true);
+                    console.log(`Password reset failed: Username not found: ${username}`);
+                }
+            } catch (error) {
+                // *** Auto-closes: Error during password reset ***
+                showCustomPopup(`Error during password reset: ${error.message}`, true);
+                console.error("Error resetting password:", error);
+            }
+        }
+        // --- END NEW: Handle Forgot Password Flow ---
+
+
+        // Function to load the form variant (Existing or New User)
+        window.loadForm = function (variant) {
+            const titleElement = document.getElementById("title");
+            const usernameInput = document.getElementById("username");
+            const passwordLabel = document.getElementById("password-label");
+            const passkeyInput = document.getElementById("passkey");
+            const submitButton = document.getElementById("submit");
+            const forgotPasswordButton = document.getElementById("forgot-password-btn");
+
+            const formElements = [titleElement, usernameInput, passwordLabel, passkeyInput, submitButton, forgotPasswordButton];
+
+            clearTimeout(formAnimationTimeoutId);
+
+            formElements.forEach(el => {
+                el.classList.remove('show');
+                if (el.tagName === 'INPUT') {
+                    el.value = ''; 
+                }
+            });
+
+            const hideDuration = 500; 
+            formAnimationTimeoutId = setTimeout(() => {
+                titleElement.innerText = (variant === 1) ? "Enter Username" : "Create Username";
+                passwordLabel.innerText = (variant === 1) ? "Enter Password" : "Create Password";
+                currentFormType = variant;
+
+                setTimeout(() => titleElement.classList.add('show'), 100);
+                setTimeout(() => usernameInput.classList.add('show'), 200);
+                setTimeout(() => passwordLabel.classList.add('show'), 300);
+                setTimeout(() => passkeyInput.classList.add('show'), 400);
+                setTimeout(() => submitButton.classList.add('show'), 500);
+                setTimeout(() => forgotPasswordButton.classList.add('show'), 600); 
+
+            }, hideDuration + 50); 
+        }
+
+        // Function to handle form submission
+        window.submitHandler = function () {
+            const username = document.getElementById("username").value;
+            const passkey = document.getElementById("passkey").value;
+
+            if (!username || !passkey) {
+                // *** Auto-closes: Missing input warning ***
+                showCustomPopup("Please enter both username and password.", true);
+                return;
+            }
+
+            if (currentFormType === 1) {
+                signInUser(username, passkey);
+            } else if (currentFormType === 2) {
+                writeUserData(username, passkey);
+            } else {
+                // *** Auto-closes: Form not selected warning ***
+                showCustomPopup("Please select 'Existing User' or 'New User' first!", true);
+            }
+        }
+
+        window.addEventListener('load', function() {
+            const popupDismissBtn = document.getElementById('popup-dismiss-button');
+            if (popupDismissBtn) {
+                popupDismissBtn.addEventListener('click', hideCustomPopup);
+            }
+
+            const forgotPasswordBtn = document.getElementById('forgot-password-btn');
+            if (forgotPasswordBtn) {
+                forgotPasswordBtn.addEventListener('click', handleForgotPassword); 
+            }
+        });
+
+    </script>
+
+    <style>
+        :root {
+            --primary-bg: #A0522D; /* Sienna */
+            --secondary-bg: #D2691E; /* Chocolate */
+            --accent-bg: #FF7F50; /* Coral */
+            --light-accent: #CD5C5C; /* IndianRed */
+            --text-color: azure;
+            --button-bg: black;
+            --button-hover: darkslategray;
+        }
+
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            color: var(--text-color);
+            text-align: center;
+            
+            background: linear-gradient(-45deg, var(--primary-bg), var(--secondary-bg), var(--accent-bg), var(--light-accent));
+            background-size: 400% 400%;
+            animation: gradientAnimation 15s ease infinite;
+            
+            min-height: 100vh; 
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            box-sizing: border-box; 
+            margin: 0; 
+            overflow: hidden; 
+        }
+
+        @keyframes gradientAnimation {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .main-container {
+            background-color: rgba(0, 0, 0, 0.6); 
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            padding: 30px 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px; 
+            max-width: 500px;
+            width: 90%;
+        }
+
+        h1 {
+            text-shadow: 2px 2px 5px rgba(0, 0, 0, 0.3); 
+        }
+
+        .hoverable {
+            background-color: var(--button-bg);
+            color: var(--text-color);
+            font-size: large;
+            padding: 12px 25px; 
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+            margin: 5px;
+            transition: all 0.3s ease; 
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); 
+        }
+
+        .hoverable:hover {
+            background-color: var(--button-hover);
+            transform: translateY(-3px) scale(1.02); 
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4); 
+        }
+
+        input {
+            width: 80%;
+            max-width: 300px;
+            padding: 10px;
+            margin-top: 5px; 
+            margin-bottom: 15px; 
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            box-sizing: border-box;
+            color: black;
+            font-size: large;
+            transition: all 0.5s ease-out; 
+        }
+
+        input::placeholder {
+            color: #aaa;
+        }
+
+        #title, #username, #password-label, #passkey, #submit, #forgot-password-btn {
+            opacity: 0;
+            transform: translateY(20px);
+            pointer-events: none; 
+            display: block; 
+            transition: all 0.5s ease-out; 
+        }
+        #title { margin-top: 0; } 
+
+        #title.show, 
+        #username.show, 
+        #password-label.show, 
+        #passkey.show, 
+        #submit.show,
+        #forgot-password-btn.show { 
+            opacity: 1;
+            transform: translateY(0);
+            pointer-events: auto; 
+        }
+
+        /* --- Custom Popup Styles --- */
+        #custom-popup {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6); 
+            backdrop-filter: blur(5px); 
+            -webkit-backdrop-filter: blur(5px); 
+            display: none; 
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0; 
+            transition: opacity 0.3s ease-in-out; 
+        }
+
+        #popup-content { 
+            color: white;
+            padding: 20px 30px;
+            border-radius: 8px;
+            max-width: 80%;
+            text-align: center;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            min-width: 250px;
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            transform: scale(0.8); 
+            opacity: 0; 
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out; 
+        }
+
+        #popup-content.show { 
+            transform: scale(1);
+            opacity: 1;
+        }
+
+        #popup-message-text { 
+            font-size: 1.2em;
+            margin-bottom: 15px; 
+        }
+
+        #popup-dismiss-button {
+            font-size: medium; 
+            margin-top: 10px; 
+        }
+        /* --- End Custom Popup Styles --- */
+    </style>
+</head>
+
+<body>
+    <div class="main-container">
+        <h1>Sign in to your account</h1>
+        <div>
+            <button class="hoverable" onclick="loadForm(1)">Existing User</button>
+            <button class="hoverable" onclick="loadForm(2)">New User</button>
+        </div>
+        
+        <h1 id="title"></h1>
+        <input id="username" class="hoverable" type="text" placeholder="Enter Username">
+        
+        <h1 id="password-label"></h1>
+        <input id="passkey" class="hoverable" type="password" placeholder="Enter Password">
+        
+        <button id="submit" class="hoverable" style="font-size: xx-large;" onclick="submitHandler()">Submit</button>
+        
+        <button id="forgot-password-btn" class="hoverable" style="font-size: small; margin-top: 10px;">Forgot Password?</button>
+    </div>
+
+    <div id="custom-popup">
+        <div id="popup-content"> 
+            <p id="popup-message-text"></p> 
+            <button id="popup-dismiss-button" class="hoverable">Dismiss</button>
+        </div>
+    </div>
+</body>
+
+</html>
